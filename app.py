@@ -41,10 +41,11 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-st.set_page_config(page_title="Rev's Trading Company", layout="wide")
+st.set_page_config(page_title="My Trading Guide", layout="wide")
 
 # ---------------------------------------------------------------------
-# WATCHLIST: your picks + full Nifty 50
+# WATCHLIST: your picks + full Nifty 50 + 10 additional fundamentally-
+# screened stocks outside the Nifty 50
 # ---------------------------------------------------------------------
 YOUR_PICKS = [
     "COFORGE.NS",
@@ -56,6 +57,25 @@ YOUR_PICKS = [
     "BORORENEW.NS",
     "JARO.NS",
     "TPLPLASTEH.NS",
+]
+
+# Additional non-Nifty50 names with generally solid public reputations for
+# fundamentals (established businesses, historically decent ROE/margins).
+# IMPORTANT: this is a starting list to screen, not a recommendation --
+# the app's own fundamentals filter will grade each one honestly once
+# it pulls live numbers. Some may come back CAUTION or even AVOID if
+# their current financials have weakened since I last knew about them.
+ADDITIONAL_SCREENED_PICKS = [
+    "KAJARIACER.NS",   # Kajaria Ceramics
+    "PIIND.NS",        # PI Industries
+    "CDSL.NS",         # Central Depository Services
+    "APLAPOLLO.NS",    # APL Apollo Tubes
+    "KPITTECH.NS",     # KPIT Technologies
+    "DIXON.NS",        # Dixon Technologies
+    "SUPREMEIND.NS",   # Supreme Industries
+    "AMBER.NS",        # Amber Enterprises
+    "POLYCAB.NS",      # Polycab India
+    "CUMMINSIND.NS",   # Cummins India
 ]
 
 NIFTY_50_CONSTITUENTS = [
@@ -71,7 +91,8 @@ NIFTY_50_CONSTITUENTS = [
     "TECHM.NS", "TITAN.NS", "TRENT.NS", "ULTRACEMCO.NS", "WIPRO.NS",
 ]
 
-DEFAULT_WATCHLIST = YOUR_PICKS + [t for t in NIFTY_50_CONSTITUENTS if t not in YOUR_PICKS]
+_combined = YOUR_PICKS + ADDITIONAL_SCREENED_PICKS
+DEFAULT_WATCHLIST = _combined + [t for t in NIFTY_50_CONSTITUENTS if t not in _combined]
 
 NIFTY_TICKER = "^NSEI"
 SENSEX_TICKER = "^BSESN"
@@ -125,7 +146,7 @@ def calc_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14
 # ---------------------------------------------------------------------
 
 def fundamentals_check(ticker: str):
-    flags, score, data = [], 0, {}
+    flags, positives, score, data = [], [], 0, {}
     try:
         info = yf.Ticker(ticker).info
     except Exception:
@@ -143,6 +164,7 @@ def fundamentals_check(ticker: str):
     data["Debt/Equity"] = round(debt_to_equity, 1) if debt_to_equity is not None else "N/A"
     data["Profit Margin %"] = round(profit_margin * 100, 1) if profit_margin is not None else "N/A"
 
+    # ---- Red flags (subtract) ----
     if market_cap and market_cap < 3_000_000_000:
         flags.append(f"Very small market cap (₹{market_cap/1e7:.0f} Cr) -- low liquidity, easy to move on thin volume")
         score -= 2
@@ -163,15 +185,42 @@ def fundamentals_check(ticker: str):
         score -= 2
     if not flags:
         flags.append("No major red flags in basic fundamentals check")
-        score = 1
 
-    if score <= -3:
-        status = "AVOID — weak fundamentals"
-    elif score < 0:
+    # ---- Positive signals (add) -- this is what separates a plain "pass"
+    # from an actual Strong Buy / Buy on fundamentals ----
+    if roe is not None and roe > 0.20:
+        positives.append(f"Strong ROE ({roe*100:.1f}%) -- efficient use of shareholder capital")
+        score += 2
+    elif roe is not None and roe > 0.12:
+        positives.append(f"Decent ROE ({roe*100:.1f}%)")
+        score += 1
+
+    if pe is not None and 0 < pe < 15:
+        positives.append(f"Attractively valued (PE {pe:.1f})")
+        score += 1
+
+    if debt_to_equity is not None and debt_to_equity < 30:
+        positives.append(f"Very low leverage (Debt/Equity {debt_to_equity:.0f})")
+        score += 1
+
+    if profit_margin is not None and profit_margin > 0.15:
+        positives.append(f"Strong profit margin ({profit_margin*100:.1f}%)")
+        score += 1
+
+    # ---- Final tier: 5 levels instead of 3, so genuinely strong
+    # fundamentals stand out instead of just "passing" ----
+    if score >= 4:
+        status = "STRONG BUY — strong fundamentals"
+    elif score >= 2:
+        status = "BUY — solid fundamentals"
+    elif score >= 0:
+        status = "OK — basic checks passed"
+    elif score >= -2:
         status = "CAUTION — some weak spots"
     else:
-        status = "OK — basic checks passed"
-    return {"status": status, "flags": flags, "data": data}
+        status = "AVOID — weak fundamentals"
+
+    return {"status": status, "flags": flags + positives, "data": data}
 
 
 # ---------------------------------------------------------------------
@@ -641,9 +690,41 @@ def quick_win_rate(ticker, sl_pct=1.5, target_pct=3.0, max_hold_days=10, period=
 # UI
 # ---------------------------------------------------------------------
 
-header_col, index_col = st.columns([3, 1.2])
+# ---------------------------------------------------------------------
+# BACKGROUND STYLING
+# ---------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background: linear-gradient(135deg, #0f1c2e 0%, #16213e 50%, #0f3460 100%);
+    }
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #16213e 0%, #0f1c2e 100%);
+    }
+    h1, h2, h3 {
+        color: #f0f4f8 !important;
+    }
+    [data-testid="stMetricValue"] {
+        color: #f0f4f8 !important;
+    }
+    .stTabs [data-baseweb="tab"] {
+        color: #d0d8e0;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+header_col, refresh_col, index_col = st.columns([2.6, 0.5, 1.2])
 with header_col:
-    st.title("📊 Rev's Trading Company")
+    st.title("📊 My Trading Guide")
+with refresh_col:
+    st.write("")  # vertical spacer to align button with title
+    st.write("")
+    if st.button("🔄 Refresh", help="Clear cached data and pull everything fresh"):
+        st.cache_data.clear()
+        st.rerun()
 with index_col:
     st.markdown("**Market Indices**")
     idx_specs = [("Nifty 50", NIFTY_TICKER), ("Sensex", SENSEX_TICKER), ("Nifty Bank", BANKNIFTY_TICKER)]
@@ -663,7 +744,7 @@ with st.sidebar:
         height=200,
     )
     watchlist = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
-    st.caption(f"{len(watchlist)} tickers loaded (your picks + full Nifty 50).")
+    st.caption(f"{len(watchlist)} tickers loaded (your picks + 10 screened extras + full Nifty 50).")
     st.divider()
     st.markdown(
         "**Disclaimer:** Rule-based signals from public data, for your own "
@@ -795,7 +876,11 @@ with tab_live:
                 return "background-color: #6b1e1e; color: white;"
             elif val.startswith("CAUTION"):
                 return "background-color: #4a4a1e; color: white;"
-            return "background-color: #1e5c2f; color: white;"
+            elif val.startswith("STRONG BUY"):
+                return "background-color: #0f8a3c; color: white; font-weight: bold;"
+            elif val.startswith("BUY"):
+                return "background-color: #1e5c2f; color: white;"
+            return "background-color: #3a3a3a; color: white;"  # OK — neutral pass
 
         st.subheader("Signal Summary")
         display_cols = ["Ticker", "Price", "% Chg", "Fundamentals", "RSI(14)", "EMA200", "ADX", "Vol x Avg", "vs Nifty", "Call", "Win Rate (hist)"]
@@ -934,7 +1019,7 @@ with tab_deep:
 
 st.divider()
 st.caption(
-    "Rev's Trading Company — combines fundamentals + RSI/EMA(9/21/50/200)/"
+    "My Trading Guide — combines fundamentals + RSI/EMA(9/21/50/200)/"
     "MACD/ADX/Volume/Nifty relative strength for live signals, plus a "
     "backtest mode. Does not include options data or order execution. "
     "Verify against a live chart and your own reading of company filings "
