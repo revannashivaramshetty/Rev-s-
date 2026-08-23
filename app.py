@@ -1,35 +1,38 @@
 """
-Personal Swing Trading Dashboard (v5 -- with EMA200)
+Rev's Trading Company (v6)
 ---------------------------------------------------------------------------
 Combines price data, RSI, EMA(9/21/50/200), MACD, ADX, volume confirmation,
 Nifty 50 relative strength, and a fundamentals red-flag filter into one
-screen, plus a Backtest tab.
+screen, plus a Backtest tab. Watchlist now includes the full Nifty 50 plus
+your own picks.
 
 Data source: Yahoo Finance (free, ~15-20 min delayed). Good enough for
 daily-timeframe swing trading. NOT for intraday scalping or live execution.
 
-HOW TO RUN LOCALLY (on your laptop):
-  1. Install Python 3.9+ if you don't have it: https://www.python.org/downloads/
-  2. Open a terminal in this folder and run:
-       pip install -r requirements.txt
-  3. Run:
-       streamlit run app.py
-  4. It opens automatically in your browser at http://localhost:8501
+HOW TO RUN LOCALLY:
+  pip install -r requirements.txt
+  streamlit run app.py
 
-TO ACCESS FROM YOUR PHONE EVEN WHEN YOUR LAPTOP IS OFF:
-  See the deployment guide (DEPLOY.md) in this same folder -- it walks
-  through hosting this for free on Streamlit Community Cloud, which runs
-  independently of your laptop.
+See DEPLOY.md for hosting this on Streamlit Community Cloud (24x7, phone
+access without your laptop running).
 
-WHAT'S NEW IN v5:
-  - EMA200 added alongside EMA9/21/50. EMA200 is a common long-term trend
-    marker -- price above EMA200 broadly means the stock is in a longer-
-    term uptrend, below means longer-term downtrend. Also checks for a
-    "Golden Cross" (EMA50 crossing above EMA200, a classic bullish signal)
-    vs "Death Cross" (EMA50 below EMA200, bearish).
-  - Data fetch window increased from 6 months to 1 year (minimum) so
-    there's enough history for EMA200 to be meaningful -- EMA200 needs
-    roughly 200 trading days of data to settle.
+WHAT'S NEW IN v6:
+  - Renamed to "Rev's Trading Company"
+  - Full Nifty 50 constituent list merged into the default watchlist,
+    alongside your existing picks (Coforge, Persistent, etc.)
+  - "Full Breakdown" section is now hidden by default -- tick the
+    checkbox above the Signal Summary table to show it
+  - Index ticker panel (top right) showing Nifty 50, Sensex, and Nifty
+    Bank live levels. GIFT Nifty is NOT included -- it trades on a
+    different exchange (NSE IX / GIFT City) and doesn't have a reliable
+    free ticker on Yahoo Finance, so rather than show a wrong or
+    unavailable number, it's left out.
+  - HONEST NOTE ON SCALE: with ~59 tickers in the default watchlist,
+    the first load can take a minute or two, and Yahoo Finance's free
+    tier may occasionally rate-limit or return a handful of blank
+    tickers under heavy load. This is a real constraint of free data
+    at this scale, not a bug -- cached data (15 min for prices, 1 hour
+    for fundamentals) makes repeat views faster.
 """
 
 import streamlit as st
@@ -38,12 +41,12 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-st.set_page_config(page_title="Swing Trading Dashboard", layout="wide")
+st.set_page_config(page_title="Rev's Trading Company", layout="wide")
 
 # ---------------------------------------------------------------------
-# YOUR WATCHLIST
+# WATCHLIST: your picks + full Nifty 50
 # ---------------------------------------------------------------------
-DEFAULT_WATCHLIST = [
+YOUR_PICKS = [
     "COFORGE.NS",
     "PERSISTENT.NS",
     "MPHASIS.NS",
@@ -55,8 +58,25 @@ DEFAULT_WATCHLIST = [
     "TPLPLASTEH.NS",
 ]
 
+NIFTY_50_CONSTITUENTS = [
+    "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS", "AXISBANK.NS",
+    "BAJAJ-AUTO.NS", "BAJFINANCE.NS", "BAJAJFINSV.NS", "BEL.NS", "BHARTIARTL.NS",
+    "CIPLA.NS", "COALINDIA.NS", "DRREDDY.NS", "EICHERMOT.NS", "ETERNAL.NS",
+    "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS", "HDFCLIFE.NS", "HINDALCO.NS",
+    "HINDUNILVR.NS", "ICICIBANK.NS", "INDIGO.NS", "INFY.NS", "ITC.NS",
+    "JIOFIN.NS", "JSWSTEEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS",
+    "MARUTI.NS", "MAXHEALTH.NS", "NESTLEIND.NS", "NTPC.NS", "ONGC.NS",
+    "POWERGRID.NS", "RELIANCE.NS", "SBILIFE.NS", "SHRIRAMFIN.NS", "SBIN.NS",
+    "SUNPHARMA.NS", "TCS.NS", "TATACONSUM.NS", "TATAMOTORS.NS", "TATASTEEL.NS",
+    "TECHM.NS", "TITAN.NS", "TRENT.NS", "ULTRACEMCO.NS", "WIPRO.NS",
+]
+
+DEFAULT_WATCHLIST = YOUR_PICKS + [t for t in NIFTY_50_CONSTITUENTS if t not in YOUR_PICKS]
+
 NIFTY_TICKER = "^NSEI"
-MIN_BARS_REQUIRED = 210  # need ~200+ trading days for EMA200 to be meaningful
+SENSEX_TICKER = "^BSESN"
+BANKNIFTY_TICKER = "^NSEBANK"
+MIN_BARS_REQUIRED = 210
 
 # ---------------------------------------------------------------------
 # INDICATOR CALCULATIONS
@@ -155,7 +175,7 @@ def fundamentals_check(ticker: str):
 
 
 # ---------------------------------------------------------------------
-# SIGNAL LOGIC (now includes EMA200 / golden-cross check)
+# SIGNAL LOGIC
 # ---------------------------------------------------------------------
 
 def generate_signal(rsi, ema9, ema21, ema50, ema200, macd, macd_signal, price,
@@ -187,7 +207,6 @@ def generate_signal(rsi, ema9, ema21, ema50, ema200, macd, macd_signal, price,
         reasons.append("Short-term EMA below medium-term — mild bearish bias")
         score -= 1
 
-    # EMA200 -- long-term trend context + golden/death cross
     if ema200 is not None and not np.isnan(ema200):
         if price > ema200:
             reasons.append("Price above EMA200 — longer-term uptrend")
@@ -195,7 +214,6 @@ def generate_signal(rsi, ema9, ema21, ema50, ema200, macd, macd_signal, price,
         else:
             reasons.append("Price below EMA200 — longer-term downtrend")
             score -= 0.5
-
         if ema50 > ema200:
             reasons.append("EMA50 above EMA200 (Golden Cross zone) — long-term bullish backdrop")
             score += 0.5
@@ -268,6 +286,22 @@ def fetch_fundamentals(ticker: str):
     return fundamentals_check(ticker)
 
 
+@st.cache_data(ttl=300)
+def fetch_index_snapshot(ticker: str):
+    """Lightweight fetch for the top index panel -- just last 5 days,
+    enough for a today % change readout."""
+    df = yf.download(ticker, period="5d", interval="1d", progress=False)
+    if df.empty or len(df) < 2:
+        return None
+    close = flatten_series(df["Close"]).dropna()
+    if len(close) < 2:
+        return None
+    last = close.iloc[-1]
+    prev = close.iloc[-2]
+    pct = ((last - prev) / prev) * 100
+    return {"level": round(float(last), 2), "pct": round(float(pct), 2)}
+
+
 def flatten_series(s):
     if isinstance(s, pd.DataFrame):
         s = s.iloc[:, 0]
@@ -309,7 +343,7 @@ def run_backtest(ticker, nifty_close_pct, sl_pct=1.5, target_pct=3.0,
     in_position = False
     entry_idx = entry_price = sl_price = target_price = None
     n = len(close)
-    start = 200  # EMA200 needs ~200 bars to be meaningful
+    start = 200
 
     for i in range(start, n):
         if not in_position:
@@ -372,17 +406,29 @@ def run_backtest(ticker, nifty_close_pct, sl_pct=1.5, target_pct=3.0,
 # UI
 # ---------------------------------------------------------------------
 
-st.title("📊 Swing Trading Dashboard")
+header_col, index_col = st.columns([3, 1.2])
+with header_col:
+    st.title("📊 Rev's Trading Company")
+with index_col:
+    st.markdown("**Market Indices**")
+    idx_specs = [("Nifty 50", NIFTY_TICKER), ("Sensex", SENSEX_TICKER), ("Nifty Bank", BANKNIFTY_TICKER)]
+    for name, tkr in idx_specs:
+        snap = fetch_index_snapshot(tkr)
+        if snap:
+            st.metric(name, f"{snap['level']:,}", f"{snap['pct']:+.2f}%")
+        else:
+            st.caption(f"{name}: unavailable right now")
+    st.caption("GIFT Nifty not shown — no reliable free ticker for it.")
 
 with st.sidebar:
     st.header("Watchlist")
     watchlist_input = st.text_area(
         "NSE tickers (comma-separated, with .NS suffix)",
         value=", ".join(DEFAULT_WATCHLIST),
-        height=140,
+        height=200,
     )
     watchlist = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
-    st.caption("Example: RELIANCE.NS, TCS.NS, INFY.NS")
+    st.caption(f"{len(watchlist)} tickers loaded (your picks + full Nifty 50).")
     st.divider()
     st.markdown(
         "**Disclaimer:** Rule-based signals from public data, for your own "
@@ -413,8 +459,7 @@ with tab_live:
         f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
-    if nifty_pct_change_today is not None:
-        st.metric("Nifty 50 today", f"{nifty_pct_change_today:+.2f}%")
+    show_breakdown = st.checkbox("Show full breakdown per stock", value=False)
 
     rows, errors = [], []
 
@@ -508,29 +553,30 @@ with tab_live:
             hide_index=True,
         )
 
-        st.subheader("Full Breakdown")
-        for _, row in result_df.iterrows():
-            with st.expander(f"{row['Ticker']} — {row['Call']} | {row['Fundamentals']}"):
-                st.write(f"**Price:** ₹{row['Price']} ({row['% Chg']:+.2f}% today)")
-                st.markdown("**Fundamentals check:**")
-                for k, v in row["Fund Data"].items():
-                    st.write(f"- {k}: {v}")
-                for flag in row["Fund Flags"].split(" | "):
-                    st.write(f"⚠️ {flag}")
-                st.markdown("**Technical read:**")
-                for reason in row["Why"].split(" | "):
-                    st.write(f"- {reason}")
+        if show_breakdown:
+            st.subheader("Full Breakdown")
+            for _, row in result_df.iterrows():
+                with st.expander(f"{row['Ticker']} — {row['Call']} | {row['Fundamentals']}"):
+                    st.write(f"**Price:** ₹{row['Price']} ({row['% Chg']:+.2f}% today)")
+                    st.markdown("**Fundamentals check:**")
+                    for k, v in row["Fund Data"].items():
+                        st.write(f"- {k}: {v}")
+                    for flag in row["Fund Flags"].split(" | "):
+                        st.write(f"⚠️ {flag}")
+                    st.markdown("**Technical read:**")
+                    for reason in row["Why"].split(" | "):
+                        st.write(f"- {reason}")
 
     if errors:
-        st.warning("Some tickers had issues:\n" + "\n".join(errors))
+        st.warning(f"{len(errors)} tickers had issues (often a temporary Yahoo Finance rate-limit at this scale):\n" + "\n".join(errors[:15]) + ("\n...and more" if len(errors) > 15 else ""))
 
 # =======================================================================
 # TAB 2: BACKTEST
 # =======================================================================
 with tab_backtest:
     st.caption(
-        "Replays the exact same rules (now including EMA200) against "
-        "historical data. Shows real win rate and average return."
+        "Replays the exact same rules against historical data. Shows real "
+        "win rate and average return."
     )
 
     col1, col2 = st.columns(2)
@@ -573,8 +619,9 @@ with tab_backtest:
 
 st.divider()
 st.caption(
-    "Combines fundamentals + RSI/EMA(9/21/50/200)/MACD/ADX/Volume/Nifty "
-    "relative strength for live signals, plus a backtest mode. Does not "
-    "include options data or order execution. Verify against a live "
-    "chart and your own reading of company filings before acting."
+    "Rev's Trading Company — combines fundamentals + RSI/EMA(9/21/50/200)/"
+    "MACD/ADX/Volume/Nifty relative strength for live signals, plus a "
+    "backtest mode. Does not include options data or order execution. "
+    "Verify against a live chart and your own reading of company filings "
+    "before acting."
 )
