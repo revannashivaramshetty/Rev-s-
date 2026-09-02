@@ -1,101 +1,43 @@
 """
-Rev's Trading Company (v6)
----------------------------------------------------------------------------
-Combines price data, RSI, EMA(9/21/50/200), MACD, ADX, volume confirmation,
-Nifty 50 relative strength, and a fundamentals red-flag filter into one
-screen, plus a Backtest tab. Watchlist now includes the full Nifty 50 plus
-your own picks.
+My Trading Partner — Signal Engine V2
+Daily swing-trading scanner for Indian equities.
 
-Data source: Yahoo Finance (free, ~15-20 min delayed). Good enough for
-daily-timeframe swing trading. NOT for intraday scalping or live execution.
+V2 design goals:
+- Regime-aware scoring instead of a simple indicator tally.
+- Trend + momentum + relative strength + volume + breakout confirmation.
+- ATR-based risk levels and extension penalty.
+- Fundamental safety gate for live signals.
+- Explicit NO TRADE / WAIT states instead of forcing a BUY.
+- Backtest enters on the next trading day's open to reduce look-ahead bias.
 
-HOW TO RUN LOCALLY:
-  pip install -r requirements.txt
-  streamlit run app.py
-
-See DEPLOY.md for hosting this on Streamlit Community Cloud (24x7, phone
-access without your laptop running).
-
-WHAT'S NEW IN v6:
-  - Renamed to "Rev's Trading Company"
-  - Full Nifty 50 constituent list merged into the default watchlist,
-    alongside your existing picks (Coforge, Persistent, etc.)
-  - "Full Breakdown" section is now hidden by default -- tick the
-    checkbox above the Signal Summary table to show it
-  - Index ticker panel (top right) showing Nifty 50, Sensex, and Nifty
-    Bank live levels. GIFT Nifty is NOT included -- it trades on a
-    different exchange (NSE IX / GIFT City) and doesn't have a reliable
-    free ticker on Yahoo Finance, so rather than show a wrong or
-    unavailable number, it's left out.
-  - HONEST NOTE ON SCALE: with ~59 tickers in the default watchlist,
-    the first load can take a minute or two, and Yahoo Finance's free
-    tier may occasionally rate-limit or return a handful of blank
-    tickers under heavy load. This is a real constraint of free data
-    at this scale, not a bug -- cached data (15 min for prices, 1 hour
-    for fundamentals) makes repeat views faster.
+Data source: Yahoo Finance via yfinance. Data can be delayed/incomplete.
+This tool is research software, not investment advice or an execution system.
 """
 
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import time
 from datetime import datetime
 
-st.set_page_config(page_title="My Trading Guide", layout="wide")
+st.set_page_config(page_title="My Trading Partner", page_icon="📈", layout="wide")
 
-# ---------------------------------------------------------------------
-# WATCHLIST: your picks + full Nifty 50 + 10 additional fundamentally-
-# screened stocks outside the Nifty 50
-# ---------------------------------------------------------------------
+# ================================================================
+# CONFIG
+# ================================================================
+APP_TITLE = "📈 My Trading Partner"
+APP_SUBTITLE = "V2 — Regime-aware swing signals, risk levels & honest backtests"
+NIFTY = "^NSEI"
+BANKNIFTY = "^NSEBANK"
+SENSEX = "^BSESN"
+MIN_BARS = 220
+
 YOUR_PICKS = [
-    "COFORGE.NS",
-    "PERSISTENT.NS",
-    "MPHASIS.NS",
-    "MODISONLTD.NS",
-    "PREMIERPOL.NS",
-    "RPTECH.NS",
-    "BORORENEW.NS",
-    "JARO.NS",
-    "TPLPLASTEH.NS",
+    "COFORGE.NS", "PERSISTENT.NS", "MPHASIS.NS", "MODISONLTD.NS",
+    "PREMIERPOL.NS", "RPTECH.NS", "BORORENEW.NS", "JARO.NS", "TPLPLASTEH.NS",
 ]
 
-# Additional non-Nifty50 names with generally solid public reputations for
-# fundamentals (established businesses, historically decent ROE/margins).
-# IMPORTANT: this is a starting list to screen, not a recommendation --
-# the app's own fundamentals filter will grade each one honestly once
-# it pulls live numbers. Some may come back CAUTION or even AVOID if
-# their current financials have weakened since I last knew about them.
-ADDITIONAL_SCREENED_PICKS = [
-    "KAJARIACER.NS",   # Kajaria Ceramics
-    "PIIND.NS",        # PI Industries
-    "CDSL.NS",         # Central Depository Services
-    "APLAPOLLO.NS",    # APL Apollo Tubes
-    "KPITTECH.NS",     # KPIT Technologies
-    "DIXON.NS",        # Dixon Technologies
-    "SUPREMEIND.NS",   # Supreme Industries
-    "AMBER.NS",        # Amber Enterprises
-    "POLYCAB.NS",      # Polycab India
-    "CUMMINSIND.NS",   # Cummins India
-]
-
-# User-requested additions. COFORGE already in YOUR_PICKS, not repeated here.
-# Meesho, Groww, Pine Labs, and PhysicsWallah are recent 2025-2026 IPOs --
-# verified their exact tickers via search rather than guessing, since a
-# wrong symbol on a newly-listed stock is an easy mistake to make.
-USER_REQUESTED_ADDITIONS = [
-    "MEESHO.NS",       # Meesho
-    "GROWW.NS",        # Groww (Billionbrains Garage Ventures)
-    "INDUSTOWER.NS",   # Indus Towers
-    "MCX.NS",          # Multi Commodity Exchange
-    "PINELABS.NS",     # Pine Labs
-    "KAYNES.NS",       # Kaynes Technology
-    "ASTERDM.NS",      # Aster DM Healthcare
-    "PWL.NS",          # PhysicsWallah
-    "IFCI.NS",         # IFCI
-]
-
-NIFTY_50_CONSTITUENTS = [
+NIFTY_50 = [
     "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS", "AXISBANK.NS",
     "BAJAJ-AUTO.NS", "BAJFINANCE.NS", "BAJAJFINSV.NS", "BEL.NS", "BHARTIARTL.NS",
     "CIPLA.NS", "COALINDIA.NS", "DRREDDY.NS", "EICHERMOT.NS", "ETERNAL.NS",
@@ -108,8 +50,7 @@ NIFTY_50_CONSTITUENTS = [
     "TECHM.NS", "TITAN.NS", "TRENT.NS", "ULTRACEMCO.NS", "WIPRO.NS",
 ]
 
-# Nifty Next 50 -- combined with Nifty 50 above, this makes up Nifty 100.
-NIFTY_NEXT_50_CONSTITUENTS = [
+NIFTY_NEXT_50 = [
     "ABB.NS", "ADANIENSOL.NS", "ADANIGREEN.NS", "ADANIPOWER.NS", "AMBUJACEM.NS",
     "BAJAJHLDNG.NS", "BAJAJHFL.NS", "BANKBARODA.NS", "BPCL.NS", "BRITANNIA.NS",
     "BOSCHLTD.NS", "CANBK.NS", "CGPOWER.NS", "CHOLAFIN.NS", "DIVISLAB.NS",
@@ -122,882 +63,444 @@ NIFTY_NEXT_50_CONSTITUENTS = [
     "UNITDSPR.NS", "VBL.NS", "VEDL.NS", "ZYDUSLIFE.NS",
 ]
 
-_combined = YOUR_PICKS + ADDITIONAL_SCREENED_PICKS + USER_REQUESTED_ADDITIONS
-NIFTY_100_CONSTITUENTS = NIFTY_50_CONSTITUENTS + [t for t in NIFTY_NEXT_50_CONSTITUENTS if t not in NIFTY_50_CONSTITUENTS]
-DEFAULT_WATCHLIST = _combined + [t for t in NIFTY_100_CONSTITUENTS if t not in _combined]
+EXTRAS = [
+    "KAJARIACER.NS", "PIIND.NS", "CDSL.NS", "APLAPOLLO.NS", "KPITTECH.NS",
+    "DIXON.NS", "SUPREMEIND.NS", "AMBER.NS", "POLYCAB.NS", "CUMMINSIND.NS",
+    "MEESHO.NS", "GROWW.NS", "INDUSTOWER.NS", "MCX.NS", "PINELABS.NS",
+    "KAYNES.NS", "ASTERDM.NS", "PWL.NS", "IFCI.NS",
+]
 
-NIFTY_TICKER = "^NSEI"
-SENSEX_TICKER = "^BSESN"
-BANKNIFTY_TICKER = "^NSEBANK"
-MIN_BARS_REQUIRED = 210
-
-# ---------------------------------------------------------------------
-# INDICATOR CALCULATIONS
-# ---------------------------------------------------------------------
-
-def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+# ================================================================
+# INDICATORS
+# ================================================================
+def s1(x):
+    if isinstance(x, pd.DataFrame):
+        return x.iloc[:, 0]
+    return x
 
 
-def calc_ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
+def ema(x, n):
+    return x.ewm(span=n, adjust=False).mean()
 
 
-def calc_macd(series: pd.Series, fast=12, slow=26, signal=9):
-    ema_fast = calc_ema(series, fast)
-    ema_slow = calc_ema(series, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = calc_ema(macd_line, signal)
-    return macd_line, signal_line, macd_line - signal_line
+def rsi(x, n=14):
+    d = x.diff()
+    up = d.clip(lower=0)
+    dn = -d.clip(upper=0)
+    ag = up.ewm(alpha=1 / n, min_periods=n, adjust=False).mean()
+    al = dn.ewm(alpha=1 / n, min_periods=n, adjust=False).mean()
+    rs = ag / al.replace(0, np.nan)
+    out = 100 - 100 / (1 + rs)
+    return out.fillna(50)
 
 
-def calc_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14):
-    prev_close = close.shift(1)
-    tr = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
-    ).max(axis=1)
-    up_move = high.diff()
-    down_move = -low.diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    atr = tr.ewm(alpha=1 / period, min_periods=period).mean()
-    plus_di = 100 * pd.Series(plus_dm, index=high.index).ewm(alpha=1 / period, min_periods=period).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm, index=high.index).ewm(alpha=1 / period, min_periods=period).mean() / atr
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
-    return dx.ewm(alpha=1 / period, min_periods=period).mean()
+def atr(high, low, close, n=14):
+    pc = close.shift(1)
+    tr = pd.concat([(high-low), (high-pc).abs(), (low-pc).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/n, min_periods=n, adjust=False).mean()
 
 
-def calc_trend_status(close: pd.Series, ema21: pd.Series, ema50: pd.Series, ema200: pd.Series,
-                       slope_lookback: int = 5, swing_window: int = 10):
-    """Classifies trend using the user's exact 5-condition rule:
-    Uptrend  = Price > EMA21 > EMA50 > EMA200, all 3 EMAs sloping up,
-               and price making higher highs + higher lows.
-    Downtrend = the mirror image.
-    Anything not meeting all 5 conditions either way is 'Mixed / Sideways'.
-    Returns (label, score_adjustment) where score_adjustment feeds into
-    the overall BUY/SELL scoring -- +1.5 for a full uptrend, -1.5 for a
-    full downtrend, 0 otherwise."""
-    if len(close) < swing_window * 2 + slope_lookback + 1:
-        return "Not enough data", 0.0
-
-    price = close.iloc[-1]
-    e21, e50, e200 = ema21.iloc[-1], ema50.iloc[-1], ema200.iloc[-1]
-    e21_prior = ema21.iloc[-1 - slope_lookback]
-    e50_prior = ema50.iloc[-1 - slope_lookback]
-    e200_prior = ema200.iloc[-1 - slope_lookback]
-
-    # Higher-highs/higher-lows (or lower-highs/lower-lows) approximated by
-    # comparing the most recent swing_window-day high/low against the
-    # prior swing_window-day high/low -- a simplified but fast stand-in
-    # for full zigzag pivot detection.
-    recent_high = close.iloc[-swing_window:].max()
-    recent_low = close.iloc[-swing_window:].min()
-    prior_high = close.iloc[-2 * swing_window:-swing_window].max()
-    prior_low = close.iloc[-2 * swing_window:-swing_window].min()
-
-    up_conditions = [
-        price > e21,
-        e21 > e50,
-        e50 > e200,
-        (e21 > e21_prior) and (e50 > e50_prior) and (e200 > e200_prior),
-        (recent_high > prior_high) and (recent_low > prior_low),
-    ]
-    down_conditions = [
-        price < e21,
-        e21 < e50,
-        e50 < e200,
-        (e21 < e21_prior) and (e50 < e50_prior) and (e200 < e200_prior),
-        (recent_high < prior_high) and (recent_low < prior_low),
-    ]
-    up_count = sum(up_conditions)
-    down_count = sum(down_conditions)
-
-    if up_count == 5:
-        return "Uptrend (5/5)", 1.5
-    elif down_count == 5:
-        return "Downtrend (5/5)", -1.5
-    elif up_count >= 3:
-        return f"Leaning up ({up_count}/5)", 0.5
-    elif down_count >= 3:
-        return f"Leaning down ({down_count}/5)", -0.5
-    else:
-        return "Mixed / Sideways", 0.0
+def macd(close):
+    m = ema(close, 12) - ema(close, 26)
+    sig = ema(m, 9)
+    return m, sig, m-sig
 
 
-# ---------------------------------------------------------------------
-# FUNDAMENTALS RED-FLAG FILTER
-# ---------------------------------------------------------------------
+def adx(high, low, close, n=14):
+    pc = close.shift(1)
+    tr = pd.concat([(high-low), (high-pc).abs(), (low-pc).abs()], axis=1).max(axis=1)
+    up = high.diff()
+    down = -low.diff()
+    plus = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=close.index)
+    minus = pd.Series(np.where((down > up) & (down > 0), down, 0.0), index=close.index)
+    atrv = tr.ewm(alpha=1/n, min_periods=n, adjust=False).mean()
+    pdi = 100 * plus.ewm(alpha=1/n, min_periods=n, adjust=False).mean() / atrv
+    mdi = 100 * minus.ewm(alpha=1/n, min_periods=n, adjust=False).mean() / atrv
+    dx = 100 * (pdi-mdi).abs() / (pdi+mdi).replace(0, np.nan)
+    return dx.ewm(alpha=1/n, min_periods=n, adjust=False).mean().fillna(0)
 
-def fundamentals_check(ticker: str):
-    flags, positives, score, data = [], [], 0, {}
 
-    # NOTE: this deliberately does NOT retry with delays anymore. An
-    # earlier version retried each failed ticker with backoff sleeps,
-    # which across a ~69-stock watchlist could push total page load to
-    # several minutes and cause the whole page to time out / show
-    # nothing at all -- worse than an occasional "Unknown". Single
-    # attempt only; combined with fetch_fundamentals() below only
-    # caching SUCCESSFUL results, a stock that fails here just tries
-    # fresh again next time you hit Refresh, without stalling this run.
-    info = None
-    last_error = None
+# ================================================================
+# MARKET REGIME
+# ================================================================
+def market_regime(nifty_close):
+    c = s1(nifty_close).dropna()
+    if len(c) < 210:
+        return "UNKNOWN", 0, "Insufficient Nifty history"
+    e50 = ema(c, 50)
+    e200 = ema(c, 200)
+    last = float(c.iloc[-1])
+    bull = [last > e200.iloc[-1], e50.iloc[-1] > e200.iloc[-1], e200.iloc[-1] > e200.iloc[-6]]
+    bear = [last < e200.iloc[-1], e50.iloc[-1] < e200.iloc[-1], e200.iloc[-1] < e200.iloc[-6]]
+    if sum(bull) == 3:
+        return "BULL", 10, "Nifty above EMA200; EMA50 above EMA200; long-term slope rising"
+    if sum(bear) == 3:
+        return "BEAR", -15, "Nifty below EMA200; EMA50 below EMA200; long-term slope falling"
+    return "NEUTRAL", 0, "Market structure is mixed — require stronger stock-level confirmation"
+
+
+# ================================================================
+# FUNDAMENTALS
+# ================================================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fundamentals(ticker):
     try:
-        candidate = yf.Ticker(ticker).info
-        if candidate and len(candidate) > 5:
-            info = candidate
-        else:
-            last_error = "Empty or incomplete response from data source"
+        info = yf.Ticker(ticker).info
+        if not info or len(info) < 5:
+            return {"status":"UNKNOWN", "score":0, "reason":"Fundamental data unavailable"}
+        mcap = info.get("marketCap")
+        pe = info.get("trailingPE")
+        roe = info.get("returnOnEquity")
+        de = info.get("debtToEquity")
+        margin = info.get("profitMargins")
+        score = 0
+        reasons = []
+        if pe is not None:
+            if pe < 0: score -= 3; reasons.append("loss-making")
+            elif pe <= 35: score += 1; reasons.append("reasonable PE")
+            elif pe > 100: score -= 1; reasons.append("very high PE")
+        if roe is not None:
+            if roe >= .20: score += 2; reasons.append("ROE ≥20%")
+            elif roe >= .12: score += 1; reasons.append("ROE ≥12%")
+            elif roe < .05: score -= 2; reasons.append("weak ROE")
+        if de is not None:
+            if de < 50: score += 1; reasons.append("low leverage")
+            elif de > 150: score -= 2; reasons.append("high leverage")
+        if margin is not None:
+            if margin >= .15: score += 1; reasons.append("strong margin")
+            elif margin < 0: score -= 2; reasons.append("negative margin")
+        if mcap is not None and mcap < 3e9:
+            score -= 2; reasons.append("very small market cap")
+        if score <= -3: status = "WEAK"
+        elif score <= 0: status = "CAUTION"
+        else: status = "HEALTHY"
+        return {"status":status, "score":score, "reason":", ".join(reasons) or "basic data passed", "pe":pe, "roe":roe, "de":de, "margin":margin, "mcap":mcap}
     except Exception as e:
-        last_error = str(e)
-
-    if info is None:
-        return {
-            "status": "UNKNOWN",
-            "flags": [f"Could not fetch fundamentals right now — {last_error}. "
-                      f"Click Refresh to retry — this stock isn't cached as a "
-                      f"failure, so it'll try fresh next time."],
-            "data": {},
-            "multibagger_candidate": False,
-        }
-
-    market_cap = info.get("marketCap")
-    pe = info.get("trailingPE")
-    roe = info.get("returnOnEquity")
-    debt_to_equity = info.get("debtToEquity")
-    profit_margin = info.get("profitMargins")
-
-    data["Market Cap (Cr)"] = round(market_cap / 1e7, 1) if market_cap else "N/A"
-    data["PE"] = round(pe, 1) if pe else "N/A"
-    data["ROE %"] = round(roe * 100, 1) if roe is not None else "N/A"
-    data["Debt/Equity"] = round(debt_to_equity, 1) if debt_to_equity is not None else "N/A"
-    data["Profit Margin %"] = round(profit_margin * 100, 1) if profit_margin is not None else "N/A"
-
-    # ---- Red flags (subtract) ----
-    if market_cap and market_cap < 3_000_000_000:
-        flags.append(f"Very small market cap (₹{market_cap/1e7:.0f} Cr) -- low liquidity, easy to move on thin volume")
-        score -= 2
-    if pe is not None and pe < 0:
-        flags.append(f"Negative PE ({pe:.1f}) -- company is currently loss-making")
-        score -= 2
-    elif pe is not None and pe > 100:
-        flags.append(f"Very high PE ({pe:.1f}) -- priced for extreme future growth")
-        score -= 1
-    if roe is not None and roe < 0.05:
-        flags.append(f"Weak ROE ({roe*100:.1f}%) -- business generating little return on shareholder capital")
-        score -= 2
-    if debt_to_equity is not None and debt_to_equity > 150:
-        flags.append(f"High debt/equity ({debt_to_equity:.0f}) -- leveraged balance sheet")
-        score -= 1
-    if profit_margin is not None and profit_margin < 0:
-        flags.append(f"Negative profit margin ({profit_margin*100:.1f}%) -- losing money on operations")
-        score -= 2
-    if not flags:
-        flags.append("No major red flags in basic fundamentals check")
-
-    # ---- Positive signals (add) -- this is what separates a plain "pass"
-    # from an actual Strong Buy / Buy on fundamentals ----
-    if roe is not None and roe > 0.20:
-        positives.append(f"Strong ROE ({roe*100:.1f}%) -- efficient use of shareholder capital")
-        score += 2
-    elif roe is not None and roe > 0.12:
-        positives.append(f"Decent ROE ({roe*100:.1f}%)")
-        score += 1
-
-    if pe is not None and 0 < pe < 15:
-        positives.append(f"Attractively valued (PE {pe:.1f})")
-        score += 1
-
-    if debt_to_equity is not None and debt_to_equity < 30:
-        positives.append(f"Very low leverage (Debt/Equity {debt_to_equity:.0f})")
-        score += 1
-
-    if profit_margin is not None and profit_margin > 0.15:
-        positives.append(f"Strong profit margin ({profit_margin*100:.1f}%)")
-        score += 1
-
-    # ---- Multibagger quality-checklist proxy ----
-    # A popular 12-point retail checklist (market cap, sales/profit growth,
-    # ROE, ROCE, debt/equity, promoter holding, pledge, margins, cash flow,
-    # PE, EV/EBITDA) inspired this flag. IMPORTANT HONESTY NOTE: only 5 of
-    # those 12 items are checkable with the fast, free data this dashboard
-    # already pulls (market cap, ROE, debt/equity, profit margin as an
-    # operating-margin proxy, and PE). The rest are NOT included here:
-    #   - Sales/Profit growth (needs multi-year income statement history)
-    #   - ROCE (needs balance sheet + EBIT)
-    #   - Promoter Holding % and Pledge % (not available via this data
-    #     source at all, for any stock, at any speed)
-    #   - EV/EBITDA (needs enterprise value calculation)
-    # Pulling the missing items for the FULL watchlist (100+ stocks) would
-    # reintroduce the exact slowness that broke the page earlier, so this
-    # is a deliberately partial, fast proxy -- not the full 12-point
-    # checklist. Treat "Multibagger Candidate" as "passed the 5 checks we
-    # can verify quickly", not "passed all 12".
-    multibagger_candidate = (
-        market_cap is not None and market_cap > 10_000_000_000 and  # > ~₹1,000 Cr
-        roe is not None and roe > 0.20 and
-        debt_to_equity is not None and debt_to_equity < 50 and
-        profit_margin is not None and profit_margin > 0.15 and
-        pe is not None and 0 < pe < 60
-    )
-
-    # ---- Final tier: 5 levels instead of 3, so genuinely strong
-    # fundamentals stand out instead of just "passing" ----
-    if score >= 4:
-        status = "STRONG BUY — strong fundamentals"
-    elif score >= 2:
-        status = "BUY — solid fundamentals"
-    elif score >= 0:
-        status = "OK — basic checks passed"
-    elif score >= -2:
-        status = "CAUTION — some weak spots"
-    else:
-        status = "AVOID — weak fundamentals"
-
-    return {
-        "status": status,
-        "flags": flags + positives,
-        "data": data,
-        "multibagger_candidate": multibagger_candidate,
-    }
+        return {"status":"UNKNOWN", "score":0, "reason":str(e)}
 
 
-# ---------------------------------------------------------------------
-# ---------------------------------------------------------------------
-# SIGNAL LOGIC
-# ---------------------------------------------------------------------
-
-def call_tier_from_score(score):
-    """Shared tier thresholds -- used by generate_signal() and reused
-    after the trend-structure adjustment (calc_trend_status) shifts the
-    score, so the Live Signals table and the Backtest engine always
-    agree on what a given score means."""
-    if score >= 5:
-        return "STRONG BUY"
-    elif score >= 3:
-        return "BUY"
-    elif score <= -3:
-        return "SELL"
-    else:
-        return "HOLD / WATCH"
+# ================================================================
+# PRICE DATA
+# ================================================================
+@st.cache_data(ttl=900, show_spinner=False)
+def get_prices(ticker, period="1y"):
+    try:
+        df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=False)
+        if df.empty:
+            return pd.DataFrame()
+        for col in ["Open","High","Low","Close","Volume"]:
+            if col in df:
+                df[col] = s1(df[col]).astype(float)
+        return df.dropna(subset=["Close"])
+    except Exception:
+        return pd.DataFrame()
 
 
-def generate_signal(rsi, ema9, ema21, ema50, ema200, macd, macd_signal, price,
-                     adx, vol_ratio, rel_strength):
+# ================================================================
+# V2 SIGNAL ENGINE
+# ================================================================
+def score_snapshot(df, nifty_df, fund=None):
+    c = df["Close"]
+    h, l, v = df["High"], df["Low"], df["Volume"]
+    e9, e21, e50, e200 = ema(c,9), ema(c,21), ema(c,50), ema(c,200)
+    rv = rsi(c)
+    av = atr(h,l,c)
+    ml, ms, mh = macd(c)
+    ax = adx(h,l,c)
+    vol20 = v.rolling(20).mean()
+    volx = v / vol20
+    hh20 = c.rolling(20).max().shift(1)
+    stock_ret20 = c.pct_change(20)
+    nifty_c = s1(nifty_df["Close"]).reindex(c.index).ffill()
+    rel20 = stock_ret20 - nifty_c.pct_change(20)
+
+    price = float(c.iloc[-1]); a = float(av.iloc[-1])
+    r = float(rv.iloc[-1]); x = float(volx.iloc[-1]) if np.isfinite(volx.iloc[-1]) else 1
+    ad = float(ax.iloc[-1]); rs = float(rel20.iloc[-1]) if np.isfinite(rel20.iloc[-1]) else 0
+    atr_pct = a / price * 100 if price else 0
+    ext = (price - float(e21.iloc[-1])) / a if a else 0
+
+    score = 0.0
     reasons = []
-    score = 0
+    breakdown = {}
 
-    if rsi < 30:
-        reasons.append(f"RSI {rsi:.1f} is oversold — bounce potential")
-        score += 1
-    elif rsi > 70:
-        reasons.append(f"RSI {rsi:.1f} is overbought — pullback risk")
-        score -= 1
-    elif 40 <= rsi <= 60:
-        reasons.append(f"RSI {rsi:.1f} neutral, no strong momentum signal")
+    # 1. Market regime: 15 points
+    regime, regime_pts, regime_reason = market_regime(nifty_df["Close"])
+    score += regime_pts
+    breakdown["Market regime"] = regime_pts
+    reasons.append(regime_reason)
+
+    # 2. Trend structure: 25 points
+    trend_pts = 0
+    if price > e21.iloc[-1]: trend_pts += 5
+    if e21.iloc[-1] > e50.iloc[-1]: trend_pts += 5
+    if e50.iloc[-1] > e200.iloc[-1]: trend_pts += 5
+    if e21.iloc[-1] > e21.iloc[-6] and e50.iloc[-1] > e50.iloc[-6] and e200.iloc[-1] > e200.iloc[-6]: trend_pts += 5
+    if c.iloc[-1] > c.iloc[-11:].max() * .97 and c.iloc[-1] > c.iloc[-21:-1].min(): trend_pts += 5
+    score += trend_pts
+    breakdown["Trend"] = trend_pts
+    trend = "Strong uptrend" if trend_pts >= 20 else ("Bullish" if trend_pts >= 15 else ("Mixed" if trend_pts >= 8 else "Weak"))
+    reasons.append(f"Trend: {trend}")
+
+    # 3. Momentum: 15 points. RSI is contextual, not a blind BUY trigger.
+    mom = 0
+    if 52 <= r <= 68: mom += 7
+    elif 48 <= r < 52 or 68 < r <= 72: mom += 3
+    elif r > 78: mom -= 5
+    elif r < 35: mom -= 2
+    if ml.iloc[-1] > ms.iloc[-1]: mom += 4
+    if mh.iloc[-1] > mh.iloc[-2]: mom += 4
+    score += mom
+    breakdown["Momentum"] = mom
+    reasons.append(f"Momentum: RSI {r:.1f}, MACD {'improving' if mh.iloc[-1] > mh.iloc[-2] else 'weakening'}")
+
+    # 4. Relative strength: 10 points
+    rspts = 6 if rs > .05 else (3 if rs > 0 else (-4 if rs < -.05 else 0))
+    score += rspts
+    breakdown["Relative strength"] = rspts
+    reasons.append(f"20D relative strength vs Nifty: {rs*100:+.1f}%")
+
+    # 5. Volume / breakout: 15 points
+    bp = 0
+    breakout = price > float(hh20.iloc[-1]) if np.isfinite(hh20.iloc[-1]) else False
+    if x >= 1.5: bp += 5
+    elif x >= 1.1: bp += 2
+    if breakout: bp += 6
+    if breakout and x >= 1.5: bp += 4
+    score += bp
+    breakdown["Volume + breakout"] = bp
+    reasons.append(f"Volume {x:.2f}x average; {'20D breakout' if breakout else 'no 20D breakout'}")
+
+    # 6. Risk/extension: 10 points
+    riskpts = 5
+    if ext > 3: riskpts -= 7
+    elif ext > 2: riskpts -= 4
+    elif ext > 1.25: riskpts -= 2
+    if atr_pct > 6: riskpts -= 3
+    score += riskpts
+    breakdown["Risk / extension"] = riskpts
+    reasons.append(f"Price is {ext:.1f} ATR above EMA21; ATR {atr_pct:.1f}% of price")
+
+    # Fundamentals are a gate/adjustment, not a substitute for price action.
+    fscore = fund.get("score",0) if fund else 0
+    if fund:
+        score += max(-10, min(10, fscore * 2))
+        breakdown["Fundamentals"] = max(-10, min(10, fscore * 2))
+        reasons.append(f"Fundamentals: {fund.get('status')} — {fund.get('reason')}")
     else:
-        reasons.append(f"RSI {rsi:.1f}")
+        breakdown["Fundamentals"] = 0
 
-    if price > ema9 > ema21 > ema50:
-        reasons.append("Price above EMA9/21/50, strong short-term uptrend structure")
-        score += 2
-    elif price < ema9 < ema21 < ema50:
-        reasons.append("Price below EMA9/21/50, strong short-term downtrend structure")
-        score -= 2
-    elif ema9 > ema21:
-        reasons.append("Short-term EMA above medium-term — mild bullish bias")
-        score += 1
+    # Hard safety gates prevent an attractive score from creating a bad call.
+    gates = []
+    if fund and fund.get("status") == "WEAK": gates.append("weak fundamentals")
+    if regime == "BEAR": gates.append("bear market regime")
+    if ad < 15: gates.append("ADX <15: trend too weak")
+    if ext > 3: gates.append("price excessively extended from EMA21")
+    if not np.isfinite(a) or a <= 0: gates.append("ATR unavailable")
+
+    stop = price - 1.5 * a
+    target1 = price + 2.0 * a
+    target2 = price + 3.0 * a
+    rr = (target1-price) / (price-stop) if price > stop else 0
+
+    if gates:
+        call = "NO TRADE"
+    elif score >= 72 and trend_pts >= 15 and r <= 72:
+        call = "STRONG BUY"
+    elif score >= 58 and trend_pts >= 12 and r <= 75:
+        call = "BUY"
+    elif score >= 45:
+        call = "WATCH"
     else:
-        reasons.append("Short-term EMA below medium-term — mild bearish bias")
-        score -= 1
+        call = "WAIT"
 
-    if ema200 is not None and not np.isnan(ema200):
-        if price > ema200:
-            reasons.append("Price above EMA200 — longer-term uptrend")
-            score += 0.5
-        else:
-            reasons.append("Price below EMA200 — longer-term downtrend")
-            score -= 0.5
-        if ema50 > ema200:
-            reasons.append("EMA50 above EMA200 (Golden Cross zone) — long-term bullish backdrop")
-            score += 0.5
-        else:
-            reasons.append("EMA50 below EMA200 (Death Cross zone) — long-term bearish backdrop")
-            score -= 0.5
-
-    if macd > macd_signal and macd > 0:
-        reasons.append("MACD above signal line and above zero — bullish momentum")
-        score += 1
-    elif macd < macd_signal and macd < 0:
-        reasons.append("MACD below signal line and below zero — bearish momentum")
-        score -= 1
-    elif macd > macd_signal:
-        reasons.append("MACD just crossed above signal line — early bullish cue")
-        score += 0.5
-    else:
-        reasons.append("MACD below signal line — momentum weakening")
-        score -= 0.5
-
-    if adx is not None and not np.isnan(adx):
-        if adx < 20:
-            reasons.append(f"ADX {adx:.1f} — weak/no trend, signals here are less reliable")
-            score *= 0.5
-        elif adx > 25:
-            reasons.append(f"ADX {adx:.1f} — real trend in place, strengthens the read above")
-            score += 0.5 if score > 0 else (-0.5 if score < 0 else 0)
-        else:
-            reasons.append(f"ADX {adx:.1f} — moderate trend strength")
-
-    if vol_ratio is not None and not np.isnan(vol_ratio):
-        if vol_ratio >= 1.5:
-            reasons.append(f"Volume {vol_ratio:.1f}x the 20-day average — strong participation")
-            score += 0.5 if score > 0 else (-0.5 if score < 0 else 0)
-        elif vol_ratio < 0.7:
-            reasons.append(f"Volume only {vol_ratio:.1f}x the 20-day average — thin, be cautious")
-            score *= 0.7
-
-    if rel_strength is not None and not np.isnan(rel_strength):
-        if rel_strength > 0.5:
-            reasons.append(f"Outperforming Nifty 50 by {rel_strength:+.2f}% today")
-            score += 0.5
-        elif rel_strength < -0.5:
-            reasons.append(f"Underperforming Nifty 50 by {rel_strength:+.2f}% today")
-            score -= 0.5
-        else:
-            reasons.append("Moving roughly in line with Nifty 50 today")
-
-    call = call_tier_from_score(score)
-
-    return call, round(score, 2), reasons
-
-
-# ---------------------------------------------------------------------
-# DATA FETCH
-# ---------------------------------------------------------------------
-
-@st.cache_data(ttl=900)
-def fetch_price_data(ticker: str, period="1y", interval="1d"):
-    return yf.download(ticker, period=period, interval=interval, progress=False)
-
-
-def fetch_fundamentals(ticker: str):
-    """Manual session-level caching instead of st.cache_data here on purpose:
-    st.cache_data would cache a FAILED ('Unknown') result for the full TTL,
-    leaving a stock stuck showing Unknown for an hour even though the next
-    attempt might succeed. Only successful fetches get cached -- failed ones
-    are retried fresh on the next Refresh / page load, which is what
-    actually helps against transient rate-limiting."""
-    if "fundamentals_cache" not in st.session_state:
-        st.session_state.fundamentals_cache = {}
-    cache = st.session_state.fundamentals_cache
-
-    if ticker in cache:
-        return cache[ticker]
-
-    result = fundamentals_check(ticker)
-    if result["status"] != "UNKNOWN":
-        cache[ticker] = result
-    return result
-
-
-@st.cache_data(ttl=300)
-def fetch_index_snapshot(ticker: str):
-    """Lightweight fetch for the top index panel -- just last 5 days,
-    enough for a today % change readout."""
-    df = yf.download(ticker, period="5d", interval="1d", progress=False)
-    if df.empty or len(df) < 2:
-        return None
-    close = flatten_series(df["Close"]).dropna()
-    if len(close) < 2:
-        return None
-    last = close.iloc[-1]
-    prev = close.iloc[-2]
-    pct = ((last - prev) / prev) * 100
-    return {"level": round(float(last), 2), "pct": round(float(pct), 2)}
-
-
-def flatten_series(s):
-    if isinstance(s, pd.DataFrame):
-        s = s.iloc[:, 0]
-    return s
-
-
-# ---------------------------------------------------------------------
-# BACKTEST ENGINE
-# ---------------------------------------------------------------------
-
-def run_backtest(ticker, nifty_close_pct, sl_pct=1.5, target_pct=3.0,
-                  max_hold_days=10, period="2y"):
-    df = fetch_price_data(ticker, period=period)
-    if df.empty or len(df) < MIN_BARS_REQUIRED:
-        return None, "Not enough historical data for this stock (need at least ~1 year for EMA200)."
-
-    close = flatten_series(df["Close"]).dropna()
-    high = flatten_series(df["High"]).reindex(close.index)
-    low = flatten_series(df["Low"]).reindex(close.index)
-    volume = flatten_series(df["Volume"]).reindex(close.index)
-
-    if len(close) < MIN_BARS_REQUIRED:
-        return None, "Not enough valid historical data after cleaning."
-
-    rsi = calc_rsi(close)
-    ema9 = calc_ema(close, 9)
-    ema21 = calc_ema(close, 21)
-    ema50 = calc_ema(close, 50)
-    ema200 = calc_ema(close, 200)
-    macd_line, signal_line, _ = calc_macd(close)
-    adx = calc_adx(high, low, close)
-    avg_vol_20 = volume.rolling(20).mean()
-    vol_ratio_series = volume / avg_vol_20
-
-    stock_pct_change = close.pct_change() * 100
-    rel_strength_series = stock_pct_change - nifty_close_pct.reindex(close.index)
-
-    trades = []
-    in_position = False
-    entry_idx = entry_price = sl_price = target_price = None
-    n = len(close)
-    start = 200
-
-    for i in range(start, n):
-        if not in_position:
-            call, score, _ = generate_signal(
-                rsi.iloc[i], ema9.iloc[i], ema21.iloc[i], ema50.iloc[i], ema200.iloc[i],
-                macd_line.iloc[i], signal_line.iloc[i], close.iloc[i],
-                adx.iloc[i], vol_ratio_series.iloc[i], rel_strength_series.iloc[i]
-            )
-            # Trend-structure adjustment (user's 5-condition uptrend/downtrend
-            # rule) -- applied identically here and in the Live Signals loop
-            # so backtest win-rates stay honest against what you'd actually see.
-            _, trend_delta = calc_trend_status(
-                close.iloc[:i + 1], ema21.iloc[:i + 1], ema50.iloc[:i + 1], ema200.iloc[:i + 1]
-            )
-            score += trend_delta
-            call = call_tier_from_score(score)
-            if call in ("BUY", "STRONG BUY"):
-                in_position = True
-                entry_idx = i
-                entry_price = close.iloc[i]
-                sl_price = entry_price * (1 - sl_pct / 100)
-                target_price = entry_price * (1 + target_pct / 100)
-        else:
-            price_today = close.iloc[i]
-            days_held = i - entry_idx
-            exit_reason = None
-            if price_today <= sl_price:
-                exit_reason = "Stop-loss hit"
-            elif price_today >= target_price:
-                exit_reason = "Target hit"
-            elif days_held >= max_hold_days:
-                exit_reason = "Max hold reached"
-            if exit_reason:
-                ret_pct = ((price_today - entry_price) / entry_price) * 100
-                trades.append({
-                    "Entry Date": close.index[entry_idx].strftime("%Y-%m-%d"),
-                    "Exit Date": close.index[i].strftime("%Y-%m-%d"),
-                    "Entry Price": round(float(entry_price), 2),
-                    "Exit Price": round(float(price_today), 2),
-                    "Days Held": days_held,
-                    "Return %": round(float(ret_pct), 2),
-                    "Result": "Win" if ret_pct > 0 else "Loss",
-                    "Exit Reason": exit_reason,
-                })
-                in_position = False
-
-    if not trades:
-        return {"trades": pd.DataFrame(), "stats": None}, None
-
-    trades_df = pd.DataFrame(trades)
-    wins = trades_df[trades_df["Return %"] > 0]
-    losses = trades_df[trades_df["Return %"] <= 0]
-    stats = {
-        "Total Trades": len(trades_df),
-        "Win Rate %": round(len(wins) / len(trades_df) * 100, 1),
-        "Avg Return per Trade %": round(trades_df["Return %"].mean(), 2),
-        "Avg Win %": round(wins["Return %"].mean(), 2) if len(wins) else 0.0,
-        "Avg Loss %": round(losses["Return %"].mean(), 2) if len(losses) else 0.0,
-        "Best Trade %": round(trades_df["Return %"].max(), 2),
-        "Worst Trade %": round(trades_df["Return %"].min(), 2),
+    confidence = int(max(0, min(100, round((score + 15) / 1.1))))
+    return {
+        "score": round(score,1), "call":call, "confidence":confidence,
+        "price":price, "rsi":r, "adx":ad, "volx":x, "rel20":rs*100,
+        "atr":a, "atr_pct":atr_pct, "trend":trend, "regime":regime,
+        "stop":stop, "target1":target1, "target2":target2, "rr":rr,
+        "breakout":breakout, "extension_atr":ext, "breakdown":breakdown,
+        "reasons":reasons, "gates":gates,
     }
-    wf = stats["Win Rate %"] / 100
-    stats["Expectancy % per Trade"] = round(wf * stats["Avg Win %"] + (1 - wf) * stats["Avg Loss %"], 2)
-    return {"trades": trades_df, "stats": stats}, None
 
 
-@st.cache_data(ttl=3600)
-def quick_win_rate(ticker, sl_pct=1.5, target_pct=3.0, max_hold_days=10, period="2y"):
-    """Historical win rate for this stock's past BUY signals over the given
-    period, using the same backtest engine. Returns (win_rate_pct, trade_count)
-    or None if there isn't enough history (fewer than 5 past signals) to be
-    meaningful. This is a backtested historical frequency -- NOT a forward-
-    looking probability guarantee. Reuses cached price data, so it's cheaper
-    than it looks, but still only run for stocks currently showing BUY to
-    keep the live table responsive."""
-    nifty_df_local = fetch_price_data(NIFTY_TICKER, period=period)
-    if nifty_df_local.empty:
+# ================================================================
+# BACKTEST — NEXT OPEN ENTRY + ATR EXITS
+# ================================================================
+def backtest(ticker, period="3y", rr_target=2.0, max_hold=15):
+    df = get_prices(ticker, period)
+    nifty = get_prices(NIFTY, period)
+    if df.empty or nifty.empty or len(df) < MIN_BARS or len(nifty) < MIN_BARS:
         return None
-    nifty_close_local = flatten_series(nifty_df_local["Close"]).dropna()
-    nifty_pct_local = nifty_close_local.pct_change() * 100
+    c = df["Close"]; h=df["High"]; l=df["Low"]; o=df["Open"]
+    e21,e50,e200=ema(c,21),ema(c,50),ema(c,200)
+    rv=rsi(c); av=atr(h,l,c); ax=adx(h,l,c); ml,ms,mh=macd(c)
+    volx=df["Volume"]/df["Volume"].rolling(20).mean()
+    nclose=nifty["Close"].reindex(df.index).ffill()
+    rel20=c.pct_change(20)-nclose.pct_change(20)
+    regime_series=[]
+    ne=nifty["Close"]
+    ne50,ne200=ema(ne,50),ema(ne,200)
+    for i in range(len(df)):
+        if i < 205: regime_series.append("UNKNOWN")
+        elif ne.iloc[min(i,len(ne)-1)] > ne200.iloc[min(i,len(ne)-1)] and ne50.iloc[min(i,len(ne)-1)] > ne200.iloc[min(i,len(ne)-1)]: regime_series.append("BULL")
+        elif ne.iloc[min(i,len(ne)-1)] < ne200.iloc[min(i,len(ne)-1)] and ne50.iloc[min(i,len(ne)-1)] < ne200.iloc[min(i,len(ne)-1)]: regime_series.append("BEAR")
+        else: regime_series.append("NEUTRAL")
+    trades=[]; inpos=False; entry=None
+    i=205
+    while i < len(df)-1:
+        if not inpos:
+            price=float(c.iloc[i]); r=float(rv.iloc[i]); ad=float(ax.iloc[i]); vx=float(volx.iloc[i]) if np.isfinite(volx.iloc[i]) else 1
+            rel=float(rel20.iloc[i]) if np.isfinite(rel20.iloc[i]) else 0
+            trend=0
+            trend += 5 if price>e21.iloc[i] else 0
+            trend += 5 if e21.iloc[i]>e50.iloc[i] else 0
+            trend += 5 if e50.iloc[i]>e200.iloc[i] else 0
+            trend += 5 if e21.iloc[i]>e21.iloc[i-5] and e50.iloc[i]>e50.iloc[i-5] and e200.iloc[i]>e200.iloc[i-5] else 0
+            momentum=(7 if 52<=r<=68 else 3 if 48<=r<=72 else -3 if r>78 else 0)
+            momentum += 4 if mh.iloc[i]>mh.iloc[i-1] else 0
+            pts=(10 if regime_series[i]=="BULL" else 0 if regime_series[i]=="NEUTRAL" else -15)
+            pts += trend + momentum + (6 if rel>.05 else 3 if rel>0 else -4 if rel<-.05 else 0)
+            pts += (5 if vx>=1.5 else 2 if vx>=1.1 else 0)
+            pts += 4 if c.iloc[i] > c.iloc[i-21:i].max() else 0
+            if pts >= 58 and trend >= 15 and r <= 75 and ad >= 15 and regime_series[i] != "BEAR":
+                entry_i=i+1; entry_price=float(o.iloc[entry_i]); a=float(av.iloc[i])
+                if not np.isfinite(a) or a<=0: i+=1; continue
+                stop=entry_price-1.5*a; target=entry_price+rr_target*1.5*a
+                inpos=True; entry=(entry_i,entry_price,stop,target,i)
+                i+=1; continue
+        else:
+            entry_i,ep,stop,target,signal_i=entry
+            exit_i=None; reason=None
+            for j in range(i,min(len(df),entry_i+max_hold+1)):
+                hi=float(h.iloc[j]); lo=float(l.iloc[j]); cl=float(c.iloc[j])
+                if lo <= stop and hi >= target:
+                    exit_i=j; reason="Both touched — conservative stop-first"; xp=stop; break
+                if lo <= stop: exit_i=j; reason="Stop"; xp=stop; break
+                if hi >= target: exit_i=j; reason="Target"; xp=target; break
+            if exit_i is None:
+                j=min(len(df)-1,entry_i+max_hold); exit_i=j; xp=float(c.iloc[j]); reason="Time exit"
+            ret=(xp-ep)/ep*100
+            trades.append({"Entry":df.index[entry_i].strftime("%Y-%m-%d"),"Exit":df.index[exit_i].strftime("%Y-%m-%d"),"Entry Price":round(ep,2),"Exit Price":round(xp,2),"Return %":round(ret,2),"Reason":reason,"Days":exit_i-entry_i})
+            inpos=False; entry=None; i=exit_i+1; continue
+        i+=1
+    t=pd.DataFrame(trades)
+    if t.empty: return {"trades":t,"stats":{"Total Trades":0}}
+    wins=t[t["Return %"]>0]; losses=t[t["Return %"]<=0]
+    gross_win=wins["Return %"].sum(); gross_loss=abs(losses["Return %"].sum())
+    equity=(1+t["Return %"]/100).cumprod()
+    dd=(equity/equity.cummax()-1)*100
+    wr=len(wins)/len(t)*100
+    avgwin=wins["Return %"].mean() if len(wins) else 0
+    avgloss=losses["Return %"].mean() if len(losses) else 0
+    expectancy=(wr/100)*avgwin+(1-wr/100)*avgloss
+    return {"trades":t,"stats":{
+        "Total Trades":len(t),"Win Rate %":round(wr,1),"Expectancy %":round(expectancy,2),
+        "Profit Factor":round(gross_win/gross_loss,2) if gross_loss else np.inf,
+        "Max Drawdown %":round(float(dd.min()),2),"Avg Win %":round(avgwin,2),"Avg Loss %":round(avgloss,2),
+        "Net Return %":round((equity.iloc[-1]-1)*100,2),"Avg Hold Days":round(t["Days"].mean(),1),
+    }}
 
-    result, err = run_backtest(ticker, nifty_pct_local, sl_pct, target_pct, max_hold_days, period)
-    if err or result is None or result["stats"] is None:
-        return None
-    stats = result["stats"]
-    if stats["Total Trades"] < 5:
-        return None
-    return stats["Win Rate %"], stats["Total Trades"]
 
-
-# ---------------------------------------------------------------------
+# ================================================================
 # UI
-# ---------------------------------------------------------------------
-
-# ---------------------------------------------------------------------
-# BACKGROUND STYLING -- white background, black text throughout
-# ---------------------------------------------------------------------
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background-color: #ffffff !important;
-    }
-    [data-testid="stSidebar"] {
-        background-color: #f2f2f2 !important;
-    }
-    h1, h2, h3, h4, h5, p, span, label, div,
-    .stMarkdown, .stCaption, .stText {
-        color: #000000 !important;
-    }
-    [data-testid="stMetricValue"] {
-        color: #000000 !important;
-    }
-    [data-testid="stMetricLabel"] {
-        color: #333333 !important;
-    }
-    [data-testid="stMetricDelta"] {
-        color: #000000 !important;
-    }
-    .stTabs [data-baseweb="tab"] {
-        color: #000000 !important;
-    }
-    .stTextArea textarea {
-        color: #000000 !important;
-        background-color: #ffffff !important;
-    }
-    /* Coloured badge cells (BUY/SELL/AVOID etc.) keep their own white
-       text set inline by the table styler -- this global black-text
-       rule does not override those, since inline styles win. */
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-header_col, refresh_col, index_col = st.columns([2.6, 0.5, 1.2])
-with header_col:
-    st.title("📊 My Trading Guide")
-with refresh_col:
-    st.write("")  # vertical spacer to align button with title
-    st.write("")
-    if st.button("🔄 Refresh", help="Clear cached data and pull everything fresh"):
-        st.cache_data.clear()
-        st.rerun()
-with index_col:
-    st.markdown("**Market Indices**")
-    idx_specs = [("Nifty 50", NIFTY_TICKER), ("Sensex", SENSEX_TICKER), ("Nifty Bank", BANKNIFTY_TICKER)]
-    for name, tkr in idx_specs:
-        snap = fetch_index_snapshot(tkr)
-        if snap:
-            st.metric(name, f"{snap['level']:,}", f"{snap['pct']:+.2f}%")
-        else:
-            st.caption(f"{name}: unavailable right now")
-    st.caption("GIFT Nifty not shown — no reliable free ticker for it.")
+# ================================================================
+st.markdown("# " + APP_TITLE)
+st.markdown("### " + APP_SUBTITLE)
+st.caption("Research dashboard only • No guaranteed returns • Verify every signal on a live chart and company filings")
 
 with st.sidebar:
-    st.header("Watchlist")
+    st.header("Scanner")
+    group = st.radio("Universe", ["Nifty 50", "Nifty 100", "My Picks + Extras", "Custom"], index=0)
+    if group == "Nifty 50": watchlist=NIFTY_50
+    elif group == "Nifty 100": watchlist=list(dict.fromkeys(NIFTY_50+NIFTY_NEXT_50))
+    elif group == "My Picks + Extras": watchlist=list(dict.fromkeys(YOUR_PICKS+EXTRAS))
+    else:
+        raw=st.text_area("Tickers", value="COFORGE.NS, PERSISTENT.NS, JINDALSTEL.NS, MCX.NS")
+        watchlist=[x.strip().upper() for x in raw.split(",") if x.strip()]
+    period=st.selectbox("Price history", ["1y","2y","3y"], index=0)
+    if st.button("🔄 Clear cache / Refresh"):
+        st.cache_data.clear(); st.rerun()
 
-    st.caption("Include stock groups (untick to speed up loading — ~150 stocks total takes a while):")
-    include_your_picks = st.checkbox("Your picks (9)", value=True)
-    include_screened = st.checkbox("Screened extras (10)", value=True)
-    include_requested = st.checkbox("Recently requested (9)", value=True)
-    include_nifty50 = st.checkbox("Nifty 50 (50)", value=True)
-    include_nifty_next50 = st.checkbox("Nifty Next 50 (49)", value=True, help="Nifty 50 + Nifty Next 50 = Nifty 100")
+# Market panel
+nifty_df=get_prices(NIFTY, period)
+if not nifty_df.empty:
+    regime,_,regime_reason=market_regime(nifty_df["Close"])
+    nc=float(nifty_df["Close"].iloc[-1]); npct=(nc/float(nifty_df["Close"].iloc[-2])-1)*100
+else:
+    regime="UNKNOWN"; regime_reason="Nifty unavailable"; nc=np.nan; npct=np.nan
 
-    _groups = []
-    if include_your_picks:
-        _groups += YOUR_PICKS
-    if include_screened:
-        _groups += ADDITIONAL_SCREENED_PICKS
-    if include_requested:
-        _groups += USER_REQUESTED_ADDITIONS
-    if include_nifty50:
-        _groups += NIFTY_50_CONSTITUENTS
-    if include_nifty_next50:
-        _groups += NIFTY_NEXT_50_CONSTITUENTS
-    _default_from_groups = list(dict.fromkeys(_groups))  # dedupe, keep order
+c1,c2,c3,c4=st.columns(4)
+c1.metric("Nifty 50", f"{nc:,.0f}" if np.isfinite(nc) else "—", f"{npct:+.2f}%" if np.isfinite(npct) else None)
+c2.metric("Market regime", regime)
+c3.metric("Signals", "V2")
+c4.metric("As of", datetime.now().strftime("%d %b %Y %H:%M"))
+st.info("**Regime:** " + regime_reason)
 
-    watchlist_input = st.text_area(
-        "NSE tickers (comma-separated, with .NS suffix) — edit freely, "
-        "or use the checkboxes above to reset to a group selection",
-        value=", ".join(_default_from_groups) if _default_from_groups else "",
-        height=200,
-    )
-    watchlist = [t.strip().upper() for t in watchlist_input.split(",") if t.strip()]
-    st.caption(f"{len(watchlist)} tickers loaded.")
-    st.divider()
-    st.markdown(
-        "**Disclaimer:** Rule-based signals from public data, for your own "
-        "review only. Not financial advice, does not place trades. A stock "
-        "passing checks is not a recommendation. Backtests use daily closes "
-        "only (a simplification) and past performance never guarantees "
-        "future results. 'Multibagger?' checks only 5 of a common 12-point "
-        "checklist (market cap, ROE, debt/equity, margin, PE) — promoter "
-        "holding, pledge, ROCE, growth rates, and EV/EBITDA are NOT included; "
-        "see the caption above the table for why."
-    )
+# Main scanner
+rows=[]; errors=[]
+progress=st.progress(0)
+for i,ticker in enumerate(watchlist):
+    progress.progress((i+1)/len(watchlist), text=f"Scanning {ticker.replace('.NS','')} ({i+1}/{len(watchlist)})")
+    df=get_prices(ticker,period)
+    if df.empty or len(df)<MIN_BARS:
+        errors.append(ticker); continue
+    fund=get_fundamentals(ticker)
+    snap=score_snapshot(df,nifty_df,fund)
+    rows.append({
+        "Ticker":ticker.replace('.NS',''),"Price":round(snap["price"],2),"Call":snap["call"],
+        "Score":snap["score"],"Confidence":snap["confidence"],"RSI":round(snap["rsi"],1),
+        "ADX":round(snap["adx"],1),"Vol x":round(snap["volx"],2),"RS 20D %":round(snap["rel20"],1),
+        "Trend":snap["trend"],"Regime":snap["regime"],"Breakout":"YES" if snap["breakout"] else "—",
+        "ATR SL":round(snap["stop"],2),"T1":round(snap["target1"],2),"T2":round(snap["target2"],2),
+        "R:R":round(snap["rr"],1),"Fund":fund.get("status","UNKNOWN"),
+    })
+progress.empty()
 
-tab_live, tab_backtest = st.tabs(["📈 Live Signals", "🔄 Backtest"])
+if rows:
+    out=pd.DataFrame(rows).sort_values(["Call","Score"], ascending=[True,False])
+    st.subheader("Signal Summary — V2")
+    st.caption("The score is a ranking aid, not a probability. A hard gate can override a high score and produce NO TRADE.")
+    st.dataframe(out,use_container_width=True,hide_index=True)
 
-nifty_df = fetch_price_data(NIFTY_TICKER, period="2y")
-nifty_pct_change_today = None
-nifty_close_pct_series = pd.Series(dtype=float)
-if not nifty_df.empty and len(nifty_df) >= 2:
-    nifty_close = flatten_series(nifty_df["Close"]).dropna()
-    nifty_close_pct_series = nifty_close.pct_change() * 100
-    if len(nifty_close) >= 2:
-        nifty_pct_change_today = ((nifty_close.iloc[-1] - nifty_close.iloc[-2]) / nifty_close.iloc[-2]) * 100
+    st.subheader("Top actionable setups")
+    actionable=out[out["Call"].isin(["STRONG BUY","BUY"])].sort_values("Score",ascending=False).head(10)
+    if actionable.empty:
+        st.warning("No actionable BUY setup passed the V2 gates right now. That is intentional — the engine can say NO TRADE.")
+    else:
+        st.dataframe(actionable[["Ticker","Call","Score","Confidence","Price","ATR SL","T1","T2","R:R","RSI","ADX","Vol x","Breakout","Fund"]],use_container_width=True,hide_index=True)
 
-# =======================================================================
-# TAB 1: LIVE SIGNALS
-# =======================================================================
-with tab_live:
-    st.caption(
-        "Fundamentals filter + RSI/EMA(9/21/50/200)/MACD/ADX/Volume/Nifty-relative-strength. "
-        "Data is delayed (Yahoo Finance). "
-        f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
+    st.subheader("Why this signal?")
+    selected=st.selectbox("Inspect stock",out["Ticker"].tolist())
+    sel=selected+".NS"
+    sdf=get_prices(sel,period)
+    sf=get_fundamentals(sel)
+    if not sdf.empty and len(sdf)>=MIN_BARS:
+        ss=score_snapshot(sdf,nifty_df,sf)
+        a,b,c=st.columns(3)
+        a.metric("Call",ss["call"]); b.metric("Score",ss["score"]); c.metric("Confidence",f"{ss['confidence']}%")
+        st.write(f"**Entry reference:** ₹{ss['price']:.2f}  |  **ATR stop:** ₹{ss['stop']:.2f}  |  **Target 1:** ₹{ss['target1']:.2f}  |  **Target 2:** ₹{ss['target2']:.2f}")
+        if ss["gates"]: st.error("Blocked by: " + "; ".join(ss["gates"]))
+        for k,v in ss["breakdown"].items(): st.write(f"- **{k}:** {v:+.1f}")
+        for r in ss["reasons"]: st.write("• "+r)
 
-    show_breakdown = st.checkbox("Show full breakdown per stock", value=False)
-    st.caption(
-        "**Win Rate (hist)** = the % of this stock's past BUY signals over the last "
-        "2 years that hit target before stop-loss (1.5% SL / 3% target / 10-day max "
-        "hold, same defaults as the Backtest tab). Only shown for current BUY calls, "
-        "and only when there's enough history (5+ past signals) to mean something. "
-        "**This is a historical frequency, not a probability of what happens next** — "
-        "markets change, and a good past win rate is not a guarantee.\n\n"
-        "**Trend** = your 5-condition rule (Price > EMA21 > EMA50 > EMA200, all "
-        "three sloping up, higher-highs/higher-lows — or the mirror for downtrend). "
-        "'Uptrend (5/5)' means every condition is met; 'Leaning up/down' means 3-4 "
-        "of 5; 'Mixed / Sideways' means neither direction is clearly established.\n\n"
-        "**Multibagger?** checks only 5 of a common 12-point retail checklist "
-        "(market cap > ₹1,000 Cr, ROE > 20%, debt/equity < 0.5, profit margin > 15%, "
-        "reasonable PE) — a fast proxy, not the full checklist. Promoter holding, "
-        "pledge %, ROCE, sales/profit growth, and EV/EBITDA are NOT checked here, "
-        "either because the data isn't available from this free source at all "
-        "(promoter holding, pledge) or because checking them for 150+ stocks would "
-        "make the page too slow. A 'Yes' means it passed 5 real checks, not a "
-        "guarantee of multibagger returns — that also needs a catalyst no checklist "
-        "can predict in advance."
-    )
-
-    rows, errors = [], []
-    progress_bar = st.progress(0, text="Loading stocks...")
-
-    for i, ticker in enumerate(watchlist):
-        progress_bar.progress((i + 1) / len(watchlist), text=f"Loading {ticker.replace('.NS', '')}... ({i+1}/{len(watchlist)})")
-        try:
-            fund = fetch_fundamentals(ticker)
-            df = fetch_price_data(ticker, period="1y")
-            if df.empty or len(df) < MIN_BARS_REQUIRED:
-                errors.append(f"{ticker}: not enough price history for EMA200 (need ~1 year)")
-                continue
-
-            close = flatten_series(df["Close"]).dropna()
-            high = flatten_series(df["High"]).reindex(close.index)
-            low = flatten_series(df["Low"]).reindex(close.index)
-            volume = flatten_series(df["Volume"]).reindex(close.index)
-
-            if len(close) < MIN_BARS_REQUIRED:
-                errors.append(f"{ticker}: not enough valid price data after cleaning")
-                continue
-
-            rsi = calc_rsi(close).iloc[-1]
-            ema9 = calc_ema(close, 9).iloc[-1]
-            ema21_series = calc_ema(close, 21)
-            ema50_series = calc_ema(close, 50)
-            ema200_series = calc_ema(close, 200)
-            ema21 = ema21_series.iloc[-1]
-            ema50 = ema50_series.iloc[-1]
-            ema200 = ema200_series.iloc[-1]
-            macd_line, signal_line, _ = calc_macd(close)
-            macd_val = macd_line.iloc[-1]
-            macd_sig_val = signal_line.iloc[-1]
-            adx_val = calc_adx(high, low, close).iloc[-1]
-
-            price = close.iloc[-1]
-            prev_close = close.iloc[-2]
-            pct_change = ((price - prev_close) / prev_close) * 100
-
-            avg_vol_20 = volume.rolling(20).mean().iloc[-1]
-            today_vol = volume.iloc[-1]
-            vol_ratio = (today_vol / avg_vol_20) if avg_vol_20 and avg_vol_20 > 0 else np.nan
-            rel_strength = (pct_change - nifty_pct_change_today) if nifty_pct_change_today is not None else np.nan
-
-            if fund["status"].startswith("AVOID"):
-                call, score, reasons = "AVOID", -99, ["Fundamentals filter blocked this — see details below"]
-            else:
-                call, score, reasons = generate_signal(
-                    rsi, ema9, ema21, ema50, ema200, macd_val, macd_sig_val, price,
-                    adx_val, vol_ratio, rel_strength
-                )
-                # Trend-structure adjustment: user's 5-condition uptrend/
-                # downtrend rule (Price > EMA21 > EMA50 > EMA200, sloping
-                # up, higher-highs/higher-lows -- or the mirror for down).
-                trend_label, trend_delta = calc_trend_status(close, ema21_series, ema50_series, ema200_series)
-                score += trend_delta
-                call = call_tier_from_score(score)
-                reasons.append(f"Trend structure: {trend_label}")
-
-            multibagger_flag = "🚀 Yes (5-check proxy)" if fund.get("multibagger_candidate") else "—"
-
-            # Historical win rate -- only computed for current BUY/STRONG BUY
-            # calls to keep the table fast (each one re-runs a 2y backtest, cached).
-            win_rate_display = "—"
-            if call in ("BUY", "STRONG BUY"):
-                wr = quick_win_rate(ticker)
-                if wr is not None:
-                    win_rate_display = f"{wr[0]}% ({wr[1]} past signals)"
-                else:
-                    win_rate_display = "Not enough history"
-
-            rows.append({
-                "Ticker": ticker.replace(".NS", ""),
-                "Price": round(float(price), 2),
-                "% Chg": round(float(pct_change), 2),
-                "Fundamentals": fund["status"],
-                "RSI(14)": round(float(rsi), 1),
-                "EMA200": round(float(ema200), 1) if not np.isnan(ema200) else None,
-                "ADX": round(float(adx_val), 1) if not np.isnan(adx_val) else None,
-                "Vol x Avg": round(float(vol_ratio), 2) if not np.isnan(vol_ratio) else None,
-                "vs Nifty": round(float(rel_strength), 2) if not np.isnan(rel_strength) else None,
-                "Trend": trend_label if call != "AVOID" else "—",
-                "Multibagger?": multibagger_flag,
-                "Call": call,
-                "Win Rate (hist)": win_rate_display,
-                "Score": score,
-                "Why": " | ".join(reasons),
-                "Fund Flags": " | ".join(fund["flags"]),
-                "Fund Data": fund["data"],
-            })
-        except Exception as e:
-            errors.append(f"{ticker}: {e}")
-
-    progress_bar.empty()
-
-    if rows:
-        result_df = pd.DataFrame(rows).sort_values("Score", ascending=False)
-
-        def color_call(val):
-            if val == "STRONG BUY":
-                return "background-color: #0f8a3c; color: white; font-weight: bold;"
-            elif val == "BUY":
-                return "background-color: #1e5c2f; color: white;"
-            elif val in ("SELL", "AVOID"):
-                return "background-color: #6b1e1e; color: white;"
-            return "background-color: #4a4a1e; color: white;"  # HOLD / WATCH
-
-        st.subheader("Signal Summary")
-        st.caption(
-            "**Call** is the single combined signal — technicals (RSI/EMA/MACD/ADX/"
-            "Volume/Nifty strength) plus a fundamentals safety check behind the "
-            "scenes. A stock with genuinely weak fundamentals shows AVOID here "
-            "regardless of how the chart looks, so you won't see a BUY on a "
-            "fundamentally broken company. Fundamentals detail for any stock is "
-            "in the breakdown below, not shown separately here, to avoid two "
-            "signals appearing to disagree."
-        )
-        display_cols = ["Ticker", "Price", "% Chg", "RSI(14)", "EMA200", "ADX", "Vol x Avg", "vs Nifty", "Trend", "Multibagger?", "Call", "Win Rate (hist)"]
-        st.dataframe(
-            result_df[display_cols]
-            .style.map(color_call, subset=["Call"]),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        if show_breakdown:
-            st.subheader("Full Breakdown")
-            for _, row in result_df.iterrows():
-                with st.expander(f"{row['Ticker']} — {row['Call']} | {row['Fundamentals']}"):
-                    st.write(f"**Price:** ₹{row['Price']} ({row['% Chg']:+.2f}% today)")
-                    st.markdown("**Fundamentals check:**")
-                    for k, v in row["Fund Data"].items():
-                        st.write(f"- {k}: {v}")
-                    for flag in row["Fund Flags"].split(" | "):
-                        st.write(f"⚠️ {flag}")
-                    st.markdown("**Technical read:**")
-                    for reason in row["Why"].split(" | "):
-                        st.write(f"- {reason}")
-
-    if errors:
-        st.warning(f"{len(errors)} tickers had issues (often a temporary Yahoo Finance rate-limit at this scale):\n" + "\n".join(errors[:15]) + ("\n...and more" if len(errors) > 15 else ""))
-
-# =======================================================================
-# TAB 2: BACKTEST
-# =======================================================================
-with tab_backtest:
-    st.caption(
-        "Replays the exact same rules against historical data. Shows real "
-        "win rate and average return."
-    )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        bt_ticker = st.selectbox("Stock to backtest", options=watchlist)
-        bt_period = st.selectbox("History length", options=["1y", "2y", "3y"], index=1)
-    with col2:
-        bt_sl = st.number_input("Stop-loss %", min_value=0.5, max_value=10.0, value=1.5, step=0.5)
-        bt_target = st.number_input("Target %", min_value=0.5, max_value=20.0, value=3.0, step=0.5)
-        bt_max_hold = st.number_input("Max hold (trading days)", min_value=1, max_value=60, value=10, step=1)
-
-    if st.button("Run Backtest", type="primary"):
-        with st.spinner(f"Replaying {bt_ticker} over {bt_period}..."):
-            result, err = run_backtest(
-                bt_ticker, nifty_close_pct_series,
-                sl_pct=bt_sl, target_pct=bt_target, max_hold_days=bt_max_hold,
-                period=bt_period,
-            )
-
-        if err:
-            st.error(err)
-        elif result["stats"] is None:
-            st.info("No BUY signals triggered for this stock over this period with the current rules.")
+with st.expander("Backtest V2"):
+    bt=st.selectbox("Stock",watchlist,key="bt_stock")
+    btperiod=st.selectbox("Backtest period",["1y","2y","3y"],index=2,key="bt_period")
+    rr=st.selectbox("Target",[1.5,2.0,3.0],index=1)
+    hold=st.selectbox("Max holding days",[10,15,20],index=1)
+    if st.button("Run V2 Backtest",type="primary"):
+        with st.spinner("Running next-open / ATR backtest..."):
+            br=backtest(bt,btperiod,rr,hold)
+        if br is None:
+            st.error("Not enough data for this backtest.")
         else:
-            stats = result["stats"]
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Total Trades", stats["Total Trades"])
-            m2.metric("Win Rate", f"{stats['Win Rate %']}%")
-            m3.metric("Avg Return / Trade", f"{stats['Avg Return per Trade %']}%")
-            m4.metric("Expectancy / Trade", f"{stats['Expectancy % per Trade']}%")
+            st.json(br["stats"])
+            if not br["trades"].empty: st.dataframe(br["trades"],use_container_width=True,hide_index=True)
 
-            m5, m6, m7, m8 = st.columns(4)
-            m5.metric("Avg Win", f"{stats['Avg Win %']}%")
-            m6.metric("Avg Loss", f"{stats['Avg Loss %']}%")
-            m7.metric("Best Trade", f"{stats['Best Trade %']}%")
-            m8.metric("Worst Trade", f"{stats['Worst Trade %']}%")
-
-            st.subheader("Trade Log")
-            st.dataframe(result["trades"], use_container_width=True, hide_index=True)
-
+if errors:
+    st.warning(f"{len(errors)} symbols could not be evaluated because price history was unavailable or too short.")
 
 st.divider()
-st.caption(
-    "My Trading Guide — combines fundamentals + RSI/EMA(9/21/50/200)/"
-    "MACD/ADX/Volume/Nifty relative strength for live signals, plus a "
-    "backtest mode. Does not include options data or order execution. "
-    "Verify against a live chart and your own reading of company filings "
-    "before acting."
-)
+st.caption("My Trading Partner V2 • Yahoo Finance data • Daily swing research • No order execution • No guaranteed accuracy or returns")
