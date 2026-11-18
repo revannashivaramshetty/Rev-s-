@@ -1,0 +1,35 @@
+"""
+Rev's Trading Company (v6)
+---------------------------------------------------------------------------
+Combines price data, RSI, EMA(9/21/50/200), MACD, ADX, volume confirmation,
+Nifty 50 relative strength, and a fundamentals red-flag filter into one
+screen, plus a Backtest tab. Watchlist now includes the full Nifty 50 plus
+your own picks.
+
+Data source: Yahoo Finance (free, ~15-20 min delayed). Good enough for
+daily-timeframe swing trading. NOT for intraday scalping or live execution.
+
+HOW TO RUN LOCALLY:
+  pip install -r requirements.txt
+  streamlit run app.py
+
+See DEPLOY.md for hosting this on Streamlit Community Cloud (24x7, phone
+access without your laptop running).
+
+WHAT'S NEW IN v6:
+  - Renamed to "Rev's Trading Company"
+  - Full Nifty 50 constituent list merged into the default watchlist,
+    alongside your existing picks (Coforge, Persistent, etc.)
+  - "Full Breakdown" section is now hidden by default -- tick the
+    checkbox above the Signal Summary table to show it
+  - Index ticker panel (top right) showing Nifty 50, Sensex, and Nifty
+    Bank live levels. GIFT Nifty is NOT included -- it trades on a
+    different exchange (NSE IX / GIFT City) and doesn't have a reliable
+    free ticker on Yahoo Finance, so rather than show a wrong or
+    unavailable number, it's left out.
+  - HONEST NOTE ON SCALE: with ~59 tickers in the default watchlist,
+    the first load can take a minute or two, and Yahoo Finance's free
+    tier may occasionally rate-limit or return a handful of blank
+    tickers under heavy load. This is a real constraint of free data
+    at this scale, not a bug -- cached data (15 min for prices, 1 hour
+    for fundamentals) makes repeat views faster.
